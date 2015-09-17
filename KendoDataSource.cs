@@ -1,10 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Linq;
+using System.Net.Http;
 using System.Threading.Tasks;
 using Flurl;
 using Flurl.Http;
+using Flurl.Http.Configuration;
 using Kendo.Mvc.Extensions;
 using Newtonsoft.Json;
 using Telerik.Windows.Controls;
@@ -13,25 +16,115 @@ using Telerik.Windows.Data;
 
 namespace Teamnet.Wpf.UI
 {
-    using System.Net.Http;
-    using Flurl.Http.Configuration;
     using MvcFilterOperator = Kendo.Mvc.FilterOperator;
     using ObjectEnumerable = IEnumerable<object>;
 
-    public class KendoDataSource<TEntity> : VirtualQueryableCollectionView
+    public class KendoDataSource<TEntity> : QueryableCollectionView
+    {
+        private readonly string uri;
+        private int itemCount;
+
+        public KendoDataSource(Uri uri, int pageSize = 10) : base(new RadObservableCollection<TEntity>())
+        {
+            this.uri = uri.ToString();
+            PageSize = itemCount = pageSize;
+        }
+
+        private RadObservableCollection<TEntity> Source => (RadObservableCollection<TEntity>) SourceCollection;
+
+        public override int ItemCount => itemCount;
+
+        public override int TotalItemCount => itemCount;
+
+        protected override int GetPagingDeterminativeItemCount() => itemCount;
+
+        protected async override void OnCollectionChanged(NotifyCollectionChangedEventArgs args)
+        {
+            if(args != null && args.Action == NotifyCollectionChangedAction.Reset)
+            {
+                await LoadData();
+            }
+            base.OnCollectionChanged(args);
+        }
+
+        private async Task LoadData()
+        {
+            var result = await this.GetData<TEntity>(uri);
+            var offset = PageIndex * PageSize;
+            var missingCount = offset + result.Data.Length - Source.Count;
+            if(missingCount > 0)
+            {
+                for(int index = 0; index < missingCount; index++)
+                {
+                    Source.Add(default(TEntity));
+                }
+            }
+            for(int index = 0; index < result.Data.Length; index++)
+            {
+                Source.Insert(offset + index, result.Data[index]);
+            }
+            itemCount = result.Total;
+        }
+
+        protected override void OnFilterDescriptorsChanged()
+        {
+            base.OnFilterDescriptorsChanged();
+            Refresh();
+        }
+
+        public void HandleDistinctValues(GridViewDistinctValuesLoadingEventArgs e) => this.HandleDistinctValues(e, uri);
+    }
+
+    public class KendoVirtualDataSource<TEntity> : VirtualQueryableCollectionView
     {
         private readonly string uri;
 
-        public KendoDataSource(Uri uri, int pageSize = 10)
+        public KendoVirtualDataSource(Uri uri, int pageSize = 10)
         {
             this.uri = uri.ToString();
             VirtualItemCount = 100;
             LoadSize = pageSize;
             ItemsLoading += OnItemsLoading;
-            CustomHttpClientFactory.EnsureInitialized();
         }
 
-        public async void HandleDistinctValues(GridViewDistinctValuesLoadingEventArgs args)
+        private async void OnItemsLoading(object sender, VirtualQueryableCollectionViewItemsLoadingEventArgs e)
+        {
+            var result = await this.GetData<TEntity>(uri);
+            VirtualItemCount = result.Total;
+            Load(e.StartIndex, result.Data);
+        }
+
+        protected override int GetPagingDeterminativeItemCount() => VirtualItemCount;
+
+        protected override void OnFilterDescriptorsChanged()
+        {
+            base.OnFilterDescriptorsChanged();
+            if(VirtualItemCount == 0)
+            {
+                VirtualItemCount = 100; // refresh
+            }
+        }
+
+        public void HandleDistinctValues(GridViewDistinctValuesLoadingEventArgs e) => this.HandleDistinctValues(e, uri);
+    }
+
+    public static class Helper
+    {
+        public class CustomHttpClientFactory : DefaultHttpClientFactory
+        {
+            public override HttpClient CreateClient(Url url, HttpMessageHandler handler)
+            {
+                ((HttpClientHandler)handler).UseDefaultCredentials = true;
+                return base.CreateClient(url, handler);
+            }
+        }
+
+        static Helper()
+        {
+            FlurlHttp.Configuration.HttpClientFactory = new CustomHttpClientFactory();
+        }
+
+        public static async void HandleDistinctValues(this QueryableCollectionView view, GridViewDistinctValuesLoadingEventArgs args, string uri)
         {
             if(SetStaticValues(args))
             {
@@ -39,11 +132,11 @@ namespace Teamnet.Wpf.UI
             }
             var collection = new RadObservableCollection<object>();
             args.ItemsSource = collection;
-            var result = await GetDistinctValues(args);
+            var result = await view.GetDistinctValues(args, uri);
             collection.AddRange(result);
         }
 
-        private bool SetStaticValues(GridViewDistinctValuesLoadingEventArgs args)
+        private static bool SetStaticValues(GridViewDistinctValuesLoadingEventArgs args)
         {
             bool nullable;
             var columnType = GetColumnType(args, out nullable);
@@ -68,16 +161,16 @@ namespace Teamnet.Wpf.UI
             return true;
         }
 
-        private Task<ObjectEnumerable> GetDistinctValues(GridViewDistinctValuesLoadingEventArgs args)
+        private static Task<ObjectEnumerable> GetDistinctValues(this QueryableCollectionView view, GridViewDistinctValuesLoadingEventArgs args, string uri)
         {
             return uri
                         .AppendPathSegment("GetDistinctValues")
                         .SetQueryParam("columnName", args.Column.UniqueName)
-                        .SetQueryParam("filter", GetFilter())
+                        .SetQueryParam("filter", view.GetFilter())
                         .GetJsonAsync<ObjectEnumerable>();
         }
 
-        private Type GetColumnType(GridViewDistinctValuesLoadingEventArgs args, out bool nullable)
+        private static Type GetColumnType(GridViewDistinctValuesLoadingEventArgs args, out bool nullable)
         {
             var column = (GridViewBoundColumnBase)args.Column;
             var originalType = column.DataType;
@@ -91,56 +184,34 @@ namespace Teamnet.Wpf.UI
             return underlyingType;
         }
 
-        private async void OnItemsLoading(object sender, VirtualQueryableCollectionViewItemsLoadingEventArgs e)
-        {
-            var result = await GetData();
-            VirtualItemCount = result.Total;
-            Load(e.StartIndex, result.Data);
-        }
-
-        private Task<EntityDataSourceResult> GetData()
+        public static Task<EntityDataSourceResult<TEntity>> GetData<TEntity>(this QueryableCollectionView view, string uri)
         {
             return uri
-                        .SetQueryParam("sort", GetSort())
-                        .SetQueryParam("page", PageIndex + 1)
-                        .SetQueryParam("pageSize", PageSize)
-                        .SetQueryParam("filter", GetFilter())
-                        .GetJsonAsync<EntityDataSourceResult>();
+                        .SetQueryParam("sort", view.GetSort())
+                        .SetQueryParam("page", view.PageIndex + 1)
+                        .SetQueryParam("pageSize", view.PageSize)
+                        .SetQueryParam("filter", view.GetFilter())
+                        .GetJsonAsync<EntityDataSourceResult<TEntity>>();
         }
 
-        protected override int GetPagingDeterminativeItemCount()
+        private static string GetFilter(this QueryableCollectionView view)
         {
-            // varianta din clasa de baza merge numai cu un IQueryable
-            return VirtualItemCount;
-        }
-
-        protected override void OnFilterDescriptorsChanged()
-        {
-            base.OnFilterDescriptorsChanged();
-            if(VirtualItemCount == 0)
-            {
-                VirtualItemCount = 100; // refresh
-            }
-        }
-
-        private string GetFilter()
-        {
-            var filterDescriptors = FilterDescriptors.OfType<IColumnFilterDescriptor>().SelectMany(GetFilter);
+            var filterDescriptors = view.FilterDescriptors.OfType<IColumnFilterDescriptor>().SelectMany(GetFilter);
             return string.Join("~and~", filterDescriptors);
         }
 
-        private string GetSort()
+        private static string GetSort(this QueryableCollectionView view)
         {
-            if(SortDescriptors.Count == 0)
+            if(view.SortDescriptors.Count == 0)
             {
                 return string.Empty;
             }
-            var sortDescriptor = (ColumnSortDescriptor)SortDescriptors[0];
+            var sortDescriptor = (ColumnSortDescriptor)view.SortDescriptors[0];
             var direction = sortDescriptor.SortDirection == ListSortDirection.Ascending ? "asc" : "desc";
             return sortDescriptor.Column.UniqueName + "-" + direction;
         }
 
-        private IEnumerable<string> GetFilter(IColumnFilterDescriptor columnFilter)
+        private static IEnumerable<string> GetFilter(IColumnFilterDescriptor columnFilter)
         {
             var columnName = columnFilter.Column.UniqueName;
             var fieldFilter = columnFilter.FieldFilter;
@@ -186,31 +257,13 @@ namespace Teamnet.Wpf.UI
             }
             throw new NotImplementedException();
         }
+    }
 
-        class EntityDataSourceResult
-        {
-            public IEnumerable<AggregateResult> AggregateResults { get; set; }
-            public IEnumerable<TEntity> Data { get; set; }
-            public object Errors { get; set; }
-            public int Total { get; set; }
-        }
-
-        public class CustomHttpClientFactory : DefaultHttpClientFactory
-        {
-            static CustomHttpClientFactory()
-            {
-                FlurlHttp.Configuration.HttpClientFactory = new CustomHttpClientFactory();
-            }
-
-            public override HttpClient CreateClient(Url url, HttpMessageHandler handler)
-            {
-                ((HttpClientHandler)handler).UseDefaultCredentials = true;
-                return base.CreateClient(url, handler);
-            }
-
-            public static void EnsureInitialized()
-            {
-            }
-        }
+    public class EntityDataSourceResult<TEntity>
+    {
+        public IEnumerable<AggregateResult> AggregateResults { get; set; }
+        public TEntity[] Data { get; set; }
+        public object Errors { get; set; }
+        public int Total { get; set; }
     }
 }
