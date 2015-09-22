@@ -24,19 +24,19 @@ namespace Teamnet.Wpf.UI
         private readonly string uri;
         private int itemCount;
 
-        public KendoDataSource(Uri uri, int pageSize = 10) : base(new RadObservableCollection<TEntity>())
+        public KendoDataSource(Uri uri, int pageSize = 10) : base(new RadObservableCollection<TEntity>(new TEntity[pageSize]))
         {
             this.uri = uri.ToString();
-            PageSize = itemCount = pageSize;
+            PageSize = pageSize;
         }
 
         private RadObservableCollection<TEntity> Source => (RadObservableCollection<TEntity>) SourceCollection;
 
         public override int ItemCount => itemCount;
 
-        public override int TotalItemCount => itemCount;
-
         protected override int GetPagingDeterminativeItemCount() => itemCount;
+
+        protected override IQueryable CreateView() => QueryableSourceCollection;
 
         protected async override void OnCollectionChanged(NotifyCollectionChangedEventArgs args)
         {
@@ -50,59 +50,21 @@ namespace Teamnet.Wpf.UI
         private async Task LoadData()
         {
             var result = await this.GetData<TEntity>(uri);
-            var offset = PageIndex * PageSize;
-            var missingCount = offset + result.Data.Length - Source.Count;
-            if(missingCount > 0)
-            {
-                for(int index = 0; index < missingCount; index++)
-                {
-                    Source.Add(default(TEntity));
-                }
-            }
+            TotalItemCount = itemCount = result.Total;
             for(int index = 0; index < result.Data.Length; index++)
             {
-                Source.Insert(offset + index, result.Data[index]);
+                Source[index] = result.Data[index];
             }
-            itemCount = result.Total;
-        }
-
-        protected override void OnFilterDescriptorsChanged()
-        {
-            base.OnFilterDescriptorsChanged();
-            Refresh();
-        }
-
-        public void HandleDistinctValues(GridViewDistinctValuesLoadingEventArgs e) => this.HandleDistinctValues(e, uri);
-    }
-
-    public class KendoVirtualDataSource<TEntity> : VirtualQueryableCollectionView
-    {
-        private readonly string uri;
-
-        public KendoVirtualDataSource(Uri uri, int pageSize = 10)
-        {
-            this.uri = uri.ToString();
-            VirtualItemCount = 100;
-            LoadSize = pageSize;
-            ItemsLoading += OnItemsLoading;
-        }
-
-        private async void OnItemsLoading(object sender, VirtualQueryableCollectionViewItemsLoadingEventArgs e)
-        {
-            var result = await this.GetData<TEntity>(uri);
-            VirtualItemCount = result.Total;
-            Load(e.StartIndex, result.Data);
-        }
-
-        protected override int GetPagingDeterminativeItemCount() => VirtualItemCount;
-
-        protected override void OnFilterDescriptorsChanged()
-        {
-            base.OnFilterDescriptorsChanged();
-            if(VirtualItemCount == 0)
+            for(int index = result.Data.Length; index < PageSize; index++)
             {
-                VirtualItemCount = 100; // refresh
+                Source[index] = default(TEntity);
             }
+        }
+
+        protected override void OnFilterDescriptorsChanged()
+        {
+            PageIndex = 0;
+            base.OnFilterDescriptorsChanged();
         }
 
         public void HandleDistinctValues(GridViewDistinctValuesLoadingEventArgs e) => this.HandleDistinctValues(e, uri);
