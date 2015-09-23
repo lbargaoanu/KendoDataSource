@@ -156,12 +156,6 @@ namespace Teamnet.Wpf.UI
                         .GetJsonAsync<EntityDataSourceResult<TEntity>>();
         }
 
-        private static string GetFilter(this QueryableCollectionView view)
-        {
-            var filterDescriptors = view.FilterDescriptors.OfType<IColumnFilterDescriptor>().SelectMany(GetFilter);
-            return string.Join("~and~", filterDescriptors);
-        }
-
         private static string GetSort(this QueryableCollectionView view)
         {
             if(view.SortDescriptors.Count == 0)
@@ -171,6 +165,12 @@ namespace Teamnet.Wpf.UI
             var sortDescriptor = (ColumnSortDescriptor)view.SortDescriptors[0];
             var direction = sortDescriptor.SortDirection == ListSortDirection.Ascending ? "asc" : "desc";
             return sortDescriptor.Column.UniqueName + "-" + direction;
+        }
+
+        private static string GetFilter(this QueryableCollectionView view)
+        {
+            var filterDescriptors = view.FilterDescriptors.OfType<IColumnFilterDescriptor>().SelectMany(GetFilter);
+            return string.Join("~and~", filterDescriptors);
         }
 
         private static IEnumerable<string> GetFilter(IColumnFilterDescriptor columnFilter)
@@ -187,10 +187,8 @@ namespace Teamnet.Wpf.UI
             }
             if(columnFilter.DistinctFilter.IsActive)
             {
-                foreach(var distinctFilter in columnFilter.DistinctFilter.FilterDescriptors)
-                {
-                    yield return GetSimpleFilter(columnName, distinctFilter);
-                }
+                var distinctFilters = columnFilter.DistinctFilter.FilterDescriptors.Select(distinctFilter => GetSimpleFilter(columnName, distinctFilter));
+                yield return "("+string.Join("~or~", distinctFilters) +")";
             }
         }
 
