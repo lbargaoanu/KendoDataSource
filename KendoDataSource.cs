@@ -13,24 +13,29 @@ using Newtonsoft.Json;
 using Telerik.Windows.Controls;
 using Telerik.Windows.Controls.GridView;
 using Telerik.Windows.Data;
+using System.Collections;
+using System.Collections.ObjectModel;
+using System.Reflection;
+using Newtonsoft.Json.Linq;
 
 namespace Teamnet.Wpf.UI
 {
     using MvcFilterOperator = Kendo.Mvc.FilterOperator;
     using ObjectEnumerable = IEnumerable<object>;
 
-    public class KendoDataSource<TEntity> : QueryableCollectionView
-    {
+    public class KendoDataSource<TEntity> : QueryableCollectionView where TEntity : class
+    {        
         private readonly string uri;
         private int itemCount;
+        private bool suspendNotifications;
 
-        public KendoDataSource(Uri uri, int pageSize = 10) : base(new RadObservableCollection<TEntity>(new TEntity[pageSize]))
+        public KendoDataSource(Uri uri, int pageSize = 10) : base(new RadObservableCollection<object>(new object[pageSize]))
         {
             this.uri = uri.ToString();
             PageSize = pageSize;
         }
 
-        private RadObservableCollection<TEntity> Source => (RadObservableCollection<TEntity>) SourceCollection;
+        private RadObservableCollection<object> Source => (RadObservableCollection<object>) SourceCollection;
 
         public override int ItemCount => itemCount;
 
@@ -38,27 +43,57 @@ namespace Teamnet.Wpf.UI
 
         protected override IQueryable CreateView() => QueryableSourceCollection;
 
+        public void SuspendNotifications()
+        {
+            suspendNotifications = true;
+        }
+
+        public void ResumeNotifications()
+        {
+            suspendNotifications = false;
+        }
+
         protected async override void OnCollectionChanged(NotifyCollectionChangedEventArgs args)
         {
+            if(suspendNotifications)
+            {
+                return;
+            }
             if(args != null && args.Action == NotifyCollectionChangedAction.Reset)
             {
+                SuspendNotifications();
+                Source.SuspendNotifications();
+                for(int index = 0; index < PageSize; index++)
+                {
+                    Source[index] = null;
+                }
                 await LoadData();
+                Source.ResumeNotifications();
+                ResumeNotifications();
             }
             base.OnCollectionChanged(args);
+            var list = InternalList;
         }
 
         private async Task LoadData()
         {
             var result = await this.GetData<TEntity>(uri);
             TotalItemCount = itemCount = result.Total;
-            for(int index = 0; index < result.Data.Length; index++)
+            for(int index = 0; index < result.Items.Length; index++)
             {
-                Source[index] = result.Data[index];
+                if(IsGrouped)
+                {
+                    InternalList.Add(result.Items[index]);
+                }
+                else
+                {
+                    Source[index] = result.Items[index];
+                }
             }
-            for(int index = result.Data.Length; index < PageSize; index++)
-            {
-                Source[index] = default(TEntity);
-            }
+            //for(int index = result.Items.Length; index < PageSize; index++)
+            //{
+            //    Source[index] = null;
+            //}
         }
 
         protected override void OnFilterDescriptorsChanged()
@@ -146,14 +181,15 @@ namespace Teamnet.Wpf.UI
             return underlyingType;
         }
 
-        public static Task<EntityDataSourceResult<TEntity>> GetData<TEntity>(this QueryableCollectionView view, string uri)
+        public static async Task<IDataSourceResult> GetData<TEntity>(this QueryableCollectionView view, string uri) where TEntity : class
         {
-            return uri
+            var url = uri
                         .SetQueryParam("sort", view.GetSort())
                         .SetQueryParam("page", view.PageIndex + 1)
                         .SetQueryParam("pageSize", view.PageSize)
                         .SetQueryParam("filter", view.GetFilter())
-                        .GetJsonAsync<EntityDataSourceResult<TEntity>>();
+                        .SetQueryParam("group", view.GetGroup());
+            return view.IsGrouped ? (IDataSourceResult) await url.GetJsonAsync<DataSourceResult<GroupData<TEntity>>>() : await url.GetJsonAsync<DataSourceResult<TEntity>>();
         }
 
         private static string GetSort(this QueryableCollectionView view)
@@ -163,8 +199,21 @@ namespace Teamnet.Wpf.UI
                 return string.Empty;
             }
             var sortDescriptor = (ColumnSortDescriptor)view.SortDescriptors[0];
-            var direction = sortDescriptor.SortDirection == ListSortDirection.Ascending ? "asc" : "desc";
-            return sortDescriptor.Column.UniqueName + "-" + direction;
+            return sortDescriptor.Column.UniqueName + "-" + ToString(sortDescriptor.SortDirection);
+        }
+
+        private static string ToString(ListSortDirection? sortDirection)
+        {
+            if(sortDirection == null)
+            {
+                return string.Empty;
+            }
+            return sortDirection == ListSortDirection.Ascending ? "asc" : "desc";
+        }
+
+        private static string GetGroup(this QueryableCollectionView view)
+        {
+            return string.Join("~", view.GroupDescriptors.OfType<ColumnGroupDescriptor>().Select(g => g.Column.UniqueName+ "-" + ToString(g.SortDirection)));
         }
 
         private static string GetFilter(this QueryableCollectionView view)
@@ -219,11 +268,56 @@ namespace Teamnet.Wpf.UI
         }
     }
 
-    public class EntityDataSourceResult<TEntity>
+    public interface IDataSourceResult
+    {
+        IEnumerable<AggregateResult> AggregateResults { get; set; }
+        object Errors { get; set; }
+        int Total { get; set; }
+
+        object[] Items { get; }
+    }
+
+    public class GroupData<TEntity> : Group
+    {
+        public new TEntity[] Items { get; set; }
+    }
+
+    //public class GroupData<TEntity> : IGroup
+    //{
+    //    public bool HasSubgroups { get; set; }
+
+    //    public int ItemCount { get; set; }
+
+    //    public TEntity[] Items { get; set; }
+
+    //    public object Key { get; set; }
+
+    //    public IGroup ParentGroup { get; set; }
+
+    //    public ReadOnlyCollection<IGroup> Subgroups { get; set; }
+
+    //    IEnumerable IGroup.Items
+    //    {
+    //        get
+    //        {
+    //            return Items;
+    //        }
+    //    }
+    //}
+
+    public class DataSourceResult<TItem> : IDataSourceResult where TItem : class
     {
         public IEnumerable<AggregateResult> AggregateResults { get; set; }
-        public TEntity[] Data { get; set; }
+        public TItem[] Data { get; set; }
         public object Errors { get; set; }
         public int Total { get; set; }
+
+        public object[] Items
+        {
+            get
+            {
+                return Data;
+            }
+        }
     }
 }
