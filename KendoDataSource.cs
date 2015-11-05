@@ -23,6 +23,7 @@ namespace Teamnet.Wpf.UI
     {
         private readonly string uri;
         private int itemCount;
+        private bool suspendNotifications;
 
         public KendoDataSource(Uri uri, int pageSize = 10) : base(new RadObservableCollection<TEntity>(new TEntity[pageSize]))
         {
@@ -36,13 +37,27 @@ namespace Teamnet.Wpf.UI
 
         protected override int GetPagingDeterminativeItemCount() => itemCount;
 
-        protected override IQueryable CreateView() => QueryableSourceCollection;
+        protected override IQueryable CreateView() => IsGrouped ? QueryableSourceCollection.GroupBy(GroupDescriptors) : QueryableSourceCollection;
 
         protected async override void OnCollectionChanged(NotifyCollectionChangedEventArgs args)
         {
+            if(suspendNotifications)
+            {
+                return;
+            }
             if(args != null && args.Action == NotifyCollectionChangedAction.Reset)
             {
-                await LoadData();
+                Source.SuspendNotifications();
+                try
+                {
+                    suspendNotifications = true;
+                    await LoadData();
+                }
+                finally
+                {
+                    suspendNotifications = false;
+                    Source.ResumeNotifications();
+                }
             }
             base.OnCollectionChanged(args);
         }
@@ -51,14 +66,8 @@ namespace Teamnet.Wpf.UI
         {
             var result = await this.GetData<TEntity>(uri);
             TotalItemCount = itemCount = result.Total;
-            for(int index = 0; index < result.Data.Length; index++)
-            {
-                Source[index] = result.Data[index];
-            }
-            for(int index = result.Data.Length; index < PageSize; index++)
-            {
-                Source[index] = default(TEntity);
-            }
+            Source.Clear();
+            Source.AddRange(result.Data);
         }
 
         protected override void OnFilterDescriptorsChanged()
